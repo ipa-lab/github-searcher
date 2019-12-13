@@ -1,21 +1,20 @@
 # This script implements a tool that exhaustively samples GitHub Code Search
-# results. It is written in a semi-literal style: it should be possible to
-# read through the source in a linear fashion, more or less. Enjoy.
+# results. It is written in a semi-literal style: it should be possible to read
+# through the source in a linear fashion, more or less. Enjoy.
 
 import os, sys, argparse, shutil, time, signal
 import base64, sqlite3, csv
 import requests
 
-# Before we get to the fun stuff, we need to parse and validate arguments,
-# check environemtn variables, set up the help text and so on.
+# Before we get to the fun stuff, we need to parse and validate arguments, check
+# environemtn variables, set up the help text and so on.
 
 # fix for argparse: ensure terminal width is determined correctly
 os.environ['COLUMNS'] = str(shutil.get_terminal_size().columns)
 
 parser = argparse.ArgumentParser(
     formatter_class=argparse.RawDescriptionHelpFormatter,
-    description='Exhaustively sample the GitHub Code Search API.', 
-    epilog='') # TODO
+    description='''Exhaustively sample the GitHub Code Search API.''')
 
 parser.add_argument('query', metavar='QUERY', help='search query')
 
@@ -62,84 +61,91 @@ if args.stratum_size < 1:
 if not args.github_token:
     sys.exit('missing environment variable GITHUB_TOKEN')
 
-#-----------------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 
-# The GitHub Code Search API is limited to 1000 results per query. To get
-# around this limitation, we can take advantage of the ability to restrict
-# searches to files of a certain size. By repeatedly searching with the same
-# query but different size ranges, we can reach a pretty good sample of the
-# overall population. This is a technique known as *stratified sampling*. The
-# strata in our case are non-overlapping file size ranges.
+# The GitHub Code Search API is limited to 1000 results per query. To get around
+# this limitation, we can take advantage of the ability to restrict searches to
+# files of a certain size. By repeatedly searching with the same query but
+# different size ranges, we can reach a pretty good sample of the overall
+# population. This is a technique known as *stratified sampling*. The strata in
+# our case are non-overlapping file size ranges.
 
 # Let's start with some global definitions. We need to keep track of the first
 # and last size in the current stratum...
+
 strat_first = args.min_size
 strat_last = min(args.min_size + args.stratum_size - 1, args.max_size)
 
-# ...as well as the current stratum's population and the amount of files
-# sampled so far (in the current stratum). A value of -1 indicates "unknown".
+# ...as well as the current stratum's population and the amount of files sampled
+# so far (in the current stratum). A value of -1 indicates "unknown".
+
 pop = -1
 sam = -1
 
-# We also have an estimate of the overall population, and we keep track of the
-# total sample size so far.
+# We also have an estimate of the overall population (although it's gonna be
+# very unreliable), and we keep track of the total (cumulative) sample size so
+# far.
+
 est_pop = -1
 total_sam = -1
 
-#-----------------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 
-# During our search we want to display a table of all the strata sampled so
-# far, plus the stratum currently being sampled, some summary information, and
-# a status message. These last three items will be continuously updated to
-# signal the progress that's being made.
+# During the search we want to display a table of all the strata sampled so far,
+# plus the stratum currently being sampled, some summary information, and a
+# status message. These last three items will be continuously updated to signal
+# the progress that's being made.
 
-# First, let's just print the table header:
+# First, let's just print the table header.
+
 print('                 ┌────────────┬────────────┐')
 print('                 │ population │   sample   │')
 print('                 ├────────────┼────────────┤')
 
-# Now we'll define some functions to display the current progress. The status
-# message is kept in a global variable, because it'll make error handling a
-# bit easier later on.
+# Now we define some functions to print information about the current stratum.
+# By default, this will simply add a new line to the output. However, to be able
+# to show live progress, there is also an option to overwrite the current line.
+
+def print_stratum(overwrite=False):
+    if overwrite:
+        sys.stdout.write('\033[F\r\033[J')
+    if strat_first == strat_last:
+        size = '%d' % strat_first
+    else:
+        size = '%d .. %d' % (strat_first, strat_last)
+    pop_str = str(pop) if pop > -1 else ''
+    sam_str = str(sam) if sam > -1 else ''
+    per = '%6.2f%%' % (sam/pop*100) if pop > 0 else ''
+    print('%16s │ %10s │ %10s │ %6s' % (size, pop_str, sam_str, per))
+
+# Another function will print the footer of the table, including summary
+# statistics and the status message. Here we provide a separate function to
+# clear the footer again.
 
 status_msg = ''
 
-# This function prints all the current information.
-def print_progress():
-    n       = strat_first
-    m       = strat_last
-    size    = '%d' % n if n == m else '%d .. %d' % (n,m)
-    pop_str = str(pop) if pop > -1 else ''
-    sam_str = str(sam) if sam > -1 else ''
-    per     = '%6.2f%%' % (sam/pop*100) if pop > 0 else ''
-    print('%16s │ %10s │ %10s │ %6s' % (size, pop_str, sam_str, per))
-
+def print_footer():
+    if args.min_size == args.max_size:
+        size = '%d' % args.min_size
+    else:
+        size = '%d .. %d' % (args.min_size, args.max_size)
+    pop_str = str(est_pop) if est_pop > -1 else ''
+    sam_str = str(total_sam) if total_sam > -1 else ''
+    per = '%6.2f%%' % (total_sam/est_pop*100) if est_pop > 0 else ''
     print('                 ├────────────┼────────────┤')
     print('                 │ population │   sample   │')
     print('                 └────────────┴────────────┘')
-
-    n       = args.min_size
-    m       = args.max_size
-    size    = '%d' % n if n == m else '%d .. %d' % (n,m)
-    pop_str = str(est_pop) if est_pop > -1 else ''
-    sam_str = str(total_sam) if total_sam > -1 else ''
-    per     = '%6.2f%%' % (total_sam/est_pop*100) if est_pop > 0 else ''
     print('%16s   %10s   %10s   %6s' % (size, pop_str, sam_str, per))
     print('                   (estimated)') if est_pop > -1 else print()
-
     print()
     print(status_msg)
 
-# This one does the same, except it overwrites what was previously printed.
-# Additionally, there is an option to leave the current stratum standing,
-# allowing us to add new lines to the table.
-def overwrite_progress(leave_current_stratum=False):
-    num_lines = 7 if leave_current_stratum else 8
-    sys.stdout.write(f'\033[{num_lines}F\r\033[J') # ANSI code to clear lines
-    print_progress()
+def clear_footer():
+    sys.stdout.write(f'\033[7F\r\033[J')
 
-# This is a convenient function for just updating the status message. It also
-# returns the old message, so it can be restored later if desired.
+# For convenience, we also have function for just updating the status message.
+# It returns the old message so it can be restored later if desired.
+
 def update_status(msg):
     global status_msg
     old_msg = status_msg
@@ -148,12 +154,12 @@ def update_status(msg):
     print(status_msg)
     return old_msg
 
-#-----------------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 
-# To access the the GitHub API, we define a little helper function that makes
-# an authorized GET request and throttles the number of requests per second so
-# as not to run afoul of GitHub's rate limiting. Should a rate limiting error
-# occur nonetheless, the function waits the appropiate amount of time before
+# To access the the GitHub API, we define a little helper function that makes an
+# authorized GET request and throttles the number of requests per second so as
+# not to run afoul of GitHub's rate limiting. Should a rate limiting error occur
+# nonetheless, the function waits the appropiate amount of time before
 # automatically retrying the request.
 
 def get(url, params={}):
@@ -179,8 +185,8 @@ def handle_rate_limit_error(res):
     return get(res.url)
 
 # We also define a convenient function to do the code search for a specific
-# stratum. Note that we sort the search results by how recently a file has
-# been indexed by GitHub.
+# stratum. Note that we sort the search results by how recently a file has been
+# indexed by GitHub.
 
 def search(a,b,order='asc'):
     return get('https://api.github.com/search/code',
@@ -188,16 +194,19 @@ def search(a,b,order='asc'):
                 'sort': 'indexed', 'order': order, 'per_page': 100})
 
 # To download all files returned by a code search (up to the limit of 1000
-# imposed by GitHub), we need to deal with pagination. On each page, we
-# download all files and add them and their metadata to our results database
-# (which will be set up in the next section), provided they're not already in
-# the database (which can happen when continuing a previous search).
+# imposed by GitHub), we need to deal with pagination. On each page, we download
+# all files and add them and their metadata to our results database (which will
+# be set up in the next section), provided they're not already in the database
+# (which can happen when continuing a previous search).
 
 def download_all_files(res):
+    global pop
     download_files_from_page(res)
     while 'next' in res.links:
         update_status('Getting next page of search results...')
         res = get(res.links['next']['url'])
+        pop2 = res.json()['total_count']
+        pop = max(pop,pop2)
         download_files_from_page(res)
     update_status('')
 
@@ -205,21 +214,23 @@ def download_files_from_page(res):
     global sam, total_sam
     update_status('Downloading files...')
     for item in res.json()['items']:
-        repo = item['repository']
         if not known_file(item):
+            repo = item['repository']
             insert_repo(repo)
             file = get(item['url']).json()
             insert_file(file, repo['id'])
         sam += 1
         total_sam += 1
-        overwrite_progress()
+        clear_footer()
+        print_stratum(overwrite=True)
+        print_footer()
 
-#-----------------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 
-# This is a good place to open the connection to the results database, or
-# create one if it doesn't exist yet. The database schema follows the GitHub
-# API response schema. Our 'insert_repo' and 'insert_file' functions directly
-# take a JSON response dictionary.
+# This is a good place to open the connection to the results database, or create
+# one if it doesn't exist yet. The database schema follows the GitHub API
+# response schema. Our 'insert_repo' and 'insert_file' functions directly take a
+# JSON response dictionary.
 
 db = sqlite3.connect(args.database)
 db.executescript('''
@@ -285,26 +296,27 @@ def known_file(item):
         (item['path'], item['repository']['id']))
     return cur.fetchone()[0] == 1
 
-#-----------------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 
 # Now we can finally get into it! 
 
-# First, let's get an estimate of the total population. 
-# Note that this is a very, very unstable number that can not be relied upon!
+# First, let's get an estimate of the total population.  Note that this is a
+# very, very unstable number that can not be relied upon!
 
 status_msg = 'Getting an estimate of the overall population...'
-print_progress()
+print_footer()
 
 res = search(args.min_size, args.max_size)
 est_pop = int(res.json()['total_count'])
 total_sam = 0
 
-# Before starting the iterative search process, let's see if we have a
-# sampling statistics file that we could use to continue a previous search. If
-# so, let's get our data structures and UI up-to-date; otherwise, create a new
-# statistics file.
+# Before starting the iterative search process, let's see if we have a sampling
+# statistics file that we could use to continue a previous search. If so, let's
+# get our data structures and UI up-to-date; otherwise, create a new statistics
+# file.
 
 if os.path.isfile(args.statistics):
+    update_status('Continuing previous search...')
     with open(args.statistics, 'r') as f:
         fr = csv.reader(f)
         next(fr) # skip header
@@ -314,12 +326,14 @@ if os.path.isfile(args.statistics):
             pop = int(row[2])
             sam = int(row[3])
             total_sam += sam
-            overwrite_progress()
-            overwrite_progress(leave_current_stratum=True)
-        strat_first += args.stratum_size
-        strat_last = min(strat_last + args.stratum_size, args.max_size)
-        pop = -1
-        sam = -1
+            clear_footer()
+            print_stratum()
+            print_footer()
+        if pop > -1:
+            strat_first += args.stratum_size
+            strat_last = min(strat_last + args.stratum_size, args.max_size)
+            pop = -1
+            sam = -1
 else:
     with open(args.statistics, 'w') as f:
         f.write('stratum_first,stratum_last,population,sample\n')
@@ -327,12 +341,12 @@ else:
 statsfile = open(args.statistics, 'a', newline='')
 stats = csv.writer(statsfile)
 
-#-----------------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 
-# This is a good place to define a signal handler to cleanly deal with Ctrl-C.
-# If the user quits the program and cancels the search, we want to allow him
-# to later continue more-or-less where he left of. Thus we need to properly
-# close the database and statistic file.
+# Let's also quickly define a signal handler to cleanly deal with Ctrl-C. If the
+# user quits the program and cancels the search, we want to allow him to later
+# continue more-or-less where he left of. So we need to properly close the
+# database and statistic file.
 
 def signal_handler(sig,frame):
     db.commit()
@@ -343,16 +357,22 @@ def signal_handler(sig,frame):
 
 signal.signal(signal.SIGINT, signal_handler)
 
-#-----------------------------------------------------------------------------
+#-------------------------------------------------------------------------------
 
-# Iterating through all the strata, we sample as much as we can.
+clear_footer()
+print_stratum()
+print_footer()
+
+# Iterating through all the strata, we want to sample as much as we can.
+
 while strat_first <= args.max_size:
-    status_msg = 'Searching...'
-    overwrite_progress()
+    update_status('Searching...')
     res = search(strat_first, strat_last)
     pop = int(res.json()['total_count'])
     sam = 0
-    overwrite_progress()
+    clear_footer()
+    print_stratum(overwrite=True)
+    print_footer()
 
     download_all_files(res)
 
@@ -360,29 +380,36 @@ while strat_first <= args.max_size:
     # search with the sort order reversed, thus sampling the stratum population
     # from both ends, so to speak. This gives us a maximum sample size of 2000
     # per stratum.
+
     if pop > 1000:
         update_status('Repeating search with reverse sort order...')
         res = search(strat_first, strat_last, order='desc')
         
         # Due to the instability of search results, we might get a different
-        # population count on the second query. We will take the maximum of
-        # the two population counts for this stratum as a conservative
-        # estimate.
+        # population count on the second query. We will take the maximum of the
+        # two population counts for this stratum as a conservative estimate.
+
         pop2 = int(res.json()['total_count'])
         pop = max(pop,pop2)
-        overwrite_progress()
+        clear_footer()
+        print_stratum(overwrite=True)
+        print_footer()
 
         download_all_files(res)
 
-    # Add a new line to the table...
-    
-    overwrite_progress(leave_current_stratum=True)
+    # After we've sampled as much as we could of the current strata, commit it
+    # to the table and move on to the next one.
+
     stats.writerow([strat_first,strat_last,pop,sam])
     statsfile.flush()
-
-    # ...and move on to the next stratum.
     
     strat_first += args.stratum_size
     strat_last = min(strat_last + args.stratum_size, args.max_size)
     pop = -1
     sam = -1
+
+    clear_footer()
+    print_stratum()
+    print_footer()
+
+update_status('Done.')
