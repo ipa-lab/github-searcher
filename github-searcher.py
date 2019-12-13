@@ -7,7 +7,7 @@ import base64, sqlite3, csv
 import requests
 
 # Before we get to the fun stuff, we need to parse and validate arguments, check
-# environemtn variables, set up the help text and so on.
+# environment variables, set up the help text and so on.
 
 # fix for argparse: ensure terminal width is determined correctly
 os.environ['COLUMNS'] = str(shutil.get_terminal_size().columns)
@@ -159,7 +159,7 @@ def update_status(msg):
 # To access the the GitHub API, we define a little helper function that makes an
 # authorized GET request and throttles the number of requests per second so as
 # not to run afoul of GitHub's rate limiting. Should a rate limiting error occur
-# nonetheless, the function waits the appropiate amount of time before
+# nonetheless, the function waits the appropriate amount of time before
 # automatically retrying the request.
 
 def get(url, params={}):
