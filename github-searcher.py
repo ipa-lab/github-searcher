@@ -2,7 +2,8 @@
 # results. It is written in a semi-literal style: it should be possible to
 # read through the source in a linear fashion, more or less. Enjoy.
 
-import os, sys, argparse, shutil, time, collections, signal
+import os, sys, argparse, shutil, time, signal
+import base64, sqlite3, csv
 import requests
 
 # Before we get to the fun stuff, we need to parse and validate arguments,
@@ -50,8 +51,8 @@ args = parser.parse_args()
 
 if args.min_size < 1:
     sys.exit('min-size must be positive')
-if args.max_size < args.min_size:
-    sys.exit('max-size must be greater than or equal to min-size')
+if args.min_size >= args.max_size:
+    sys.exit('min-size must be less than or equal to max-size')
 if args.max_size < 1:
     sys.exit('max-size must be positive')
 if args.max_size > MAX_FILE_SIZE:
@@ -60,13 +61,6 @@ if args.stratum_size < 1:
     sys.exit('stratum-size must be positive')
 if not args.github_token:
     sys.exit('missing environment variable GITHUB_TOKEN')
-
-# We define a signal handler to cleanly deal with Ctrl-C
-def signal_handler(sig,frame):
-    # TODO: close database and stats file etc
-    sys.exit(0)
-
-signal.signal(signal.SIGINT, signal_handler)
 
 #-----------------------------------------------------------------------------
 
@@ -77,8 +71,8 @@ signal.signal(signal.SIGINT, signal_handler)
 # overall population. This is a technique known as *stratified sampling*. The
 # strata in our case are non-overlapping file size ranges.
 
-# Let's start with some definitions. We need to keep track of the first and
-# last size in the current stratum...
+# Let's start with some global definitions. We need to keep track of the first
+# and last size in the current stratum...
 strat_first = args.min_size
 strat_last = min(args.min_size + args.stratum_size - 1, args.max_size)
 
@@ -161,6 +155,7 @@ def update_status(msg):
 # as not to run afoul of GitHub's rate limiting. Should a rate limiting error
 # occur nonetheless, the function waits the appropiate amount of time before
 # automatically retrying the request.
+
 def get(url, params={}):
     if args.throttle:
         time.sleep(0.72) # throttle requests to ~5000 per hour
@@ -186,13 +181,17 @@ def handle_rate_limit_error(res):
 # We also define a convenient function to do the code search for a specific
 # stratum. Note that we sort the search results by how recently a file has
 # been indexed by GitHub.
+
 def search(a,b,order='asc'):
     return get('https://api.github.com/search/code',
                params={'q': f'{args.query} size:{a}..{b}', 
                 'sort': 'indexed', 'order': order, 'per_page': 100})
 
-# To download all files returned by a code search request (up to the limit of
-# 1000 imposed by GitHub), we need to deal with pagination.
+# To download all files returned by a code search (up to the limit of 1000
+# imposed by GitHub), we need to deal with pagination. On each page, we
+# download all available files and add them and their metadata to our results
+# database (which will be set up in the next section).
+
 def download_all_files(res):
     download_files_from_page(res)
     while 'next' in res.links:
@@ -201,37 +200,139 @@ def download_all_files(res):
         download_files_from_page(res)
     update_status('')
 
-# When downloading files, we add repo and file metadata, along with the file
-# contents, to our database.
 def download_files_from_page(res):
     global sam, total_sam
     update_status('Downloading files...')
     for item in res.json()['items']:
         repo = item['repository']
-        #insert_repo(repo)
-        file = get(item['url']).json()    
-        #insert_file(file, repo['id'])
-        #db.commit()
+        insert_repo(repo)
+        file = get(item['url']).json()
+        insert_file(file, repo['id'])
         sam += 1
         total_sam += 1
         overwrite_progress()
 
-# TODO: database
-# TODO: stats file and continuation
+#-----------------------------------------------------------------------------
 
+# This is a good place to open the connection to the results database, or
+# create one if it doesn't exist yet. The database schema follows the GitHub
+# API response schema. Our 'insert_repo' and 'insert_file' functions directly
+# take a JSON response dictionary.
+
+db = sqlite3.connect(args.database)
+db.executescript('''
+    CREATE TABLE IF NOT EXISTS repo 
+    ( repo_id INTEGER PRIMARY KEY
+    , name TEXT NOT NULL
+    , full_name TEXT NOT NULL
+    , description TEXT
+    , url TEXT NOT NULL
+    , fork INTEGER NOT NULL
+    , owner_id INTEGER NOT NULL
+    , owner_login TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS file
+    ( file_id INTEGER PRIMARY KEY
+    , name TEXT NOT NULL
+    , path TEXT NOT NULL
+    , size INTEGER NOT NULL
+    , sha TEXT NOT NULL
+    , content TEXT NOT NULL
+    , repo_id INTEGER NOT NULL
+    , FOREIGN KEY (repo_id) REFERENCES repo(repo_id)
+    , UNIQUE(path,repo_id)
+    );
+    ''')
+
+def insert_repo(repo):
+    db.execute('''
+        INSERT OR IGNORE INTO repo 
+            ( repo_id, name, full_name, description, url, fork
+            , owner_id, owner_login
+            )
+        VALUES (?,?,?,?,?,?,?,?)
+        ''',
+        ( repo['id']
+        , repo['name']
+        , repo['full_name']
+        , repo['description']
+        , repo['url']
+        , int(repo['fork'])
+        , repo['owner']['id']
+        , repo['owner']['login']
+        ))
+
+def insert_file(file,repo_id):
+    db.execute('''
+        INSERT OR IGNORE INTO file
+            (name, path, size, sha, content, repo_id)
+        VALUES (?,?,?,?,?,?)
+        ''',
+        ( file['name']
+        , file['path']
+        , file['size']
+        , file['sha']
+        , base64.b64decode(file['content']).decode('UTF-8')
+        , repo_id
+        ))
 
 #-----------------------------------------------------------------------------
 
 # Now we can finally get into it! 
 
+# First, let's get an estimate of the total population. 
+# Note that this is a very, very unstable number that can not be relied upon!
+
 status_msg = 'Getting an estimate of the overall population...'
 print_progress()
 
-# First, let's get an estimate of the total population. 
-# Note that this is a very, very unstable number that can not be relied upon!
 res = search(args.min_size, args.max_size)
 est_pop = int(res.json()['total_count'])
 total_sam = 0
+
+# Before starting the iterative search process, let's see if we have a
+# sampling statistics file that we could use to continue a previous search. If
+# so, let's get our data structures and UI up-to-date; otherwise, create a new
+# statistics file.
+
+if os.path.isfile(args.statistics):
+    with open(args.statistics, 'r') as f:
+        fr = csv.reader(f)
+        next(fr) # skip header
+        for row in fr:
+            strat_first = int(row[0])
+            strat_last = int(row[1])
+            pop = int(row[2])
+            sam = int(row[3])
+            total_sam += sam
+            overwrite_progress()
+            overwrite_progress(leave_current_stratum=True)
+        strat_first += args.stratum_size
+        strat_last = min(strat_last + args.stratum_size, args.max_size)
+        pop = -1
+        sam = -1
+else:
+    with open(args.statistics, 'w') as f:
+        f.write('stratum_first,stratum_last,population,sample\n')
+
+statsfile = open(args.statistics, 'a', newline='')
+stats = csv.writer(statsfile)
+
+#-----------------------------------------------------------------------------
+
+# This is a good place to define a signal handler to cleanly deal with Ctrl-C.
+# If the user quits the program and cancels the search, we want to allow him
+# to later continue more-or-less where he left of. Thus we need to properly
+# close the database and statistic file.
+
+def signal_handler(sig,frame):
+    db.close()
+    statsfile.close()
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+
+#-----------------------------------------------------------------------------
 
 # Iterating through all the strata, we sample as much as we can.
 while strat_first <= args.max_size:
@@ -263,10 +364,13 @@ while strat_first <= args.max_size:
         download_all_files(res)
 
     # Add a new line to the table...
+    
     overwrite_progress(leave_current_stratum=True)
+    stats.writerow([strat_first,strat_last,pop,sam])
 
     # ...and move on to the next stratum.
+    
     strat_first += args.stratum_size
-    strat_last = max(strat_last + args.stratum_size, args.max_size)
+    strat_last = min(strat_last + args.stratum_size, args.max_size)
     pop = -1
     sam = -1
