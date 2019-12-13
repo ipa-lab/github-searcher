@@ -189,8 +189,9 @@ def search(a,b,order='asc'):
 
 # To download all files returned by a code search (up to the limit of 1000
 # imposed by GitHub), we need to deal with pagination. On each page, we
-# download all available files and add them and their metadata to our results
-# database (which will be set up in the next section).
+# download all files and add them and their metadata to our results database
+# (which will be set up in the next section), provided they're not already in
+# the database (which can happen when continuing a previous search).
 
 def download_all_files(res):
     download_files_from_page(res)
@@ -205,9 +206,10 @@ def download_files_from_page(res):
     update_status('Downloading files...')
     for item in res.json()['items']:
         repo = item['repository']
-        insert_repo(repo)
-        file = get(item['url']).json()
-        insert_file(file, repo['id'])
+        if not known_file(item):
+            insert_repo(repo)
+            file = get(item['url']).json()
+            insert_file(file, repo['id'])
         sam += 1
         total_sam += 1
         overwrite_progress()
@@ -261,6 +263,7 @@ def insert_repo(repo):
         , repo['owner']['id']
         , repo['owner']['login']
         ))
+    db.commit()
 
 def insert_file(file,repo_id):
     db.execute('''
@@ -275,6 +278,12 @@ def insert_file(file,repo_id):
         , base64.b64decode(file['content']).decode('UTF-8')
         , repo_id
         ))
+    db.commit()
+
+def known_file(item):
+    cur = db.execute("select count(*) from file where path = ? and repo_id = ?", 
+        (item['path'], item['repository']['id']))
+    return cur.fetchone()[0] == 1
 
 #-----------------------------------------------------------------------------
 
@@ -326,7 +335,9 @@ stats = csv.writer(statsfile)
 # close the database and statistic file.
 
 def signal_handler(sig,frame):
+    db.commit()
     db.close()
+    statsfile.flush()
     statsfile.close()
     sys.exit(0)
 
@@ -367,6 +378,7 @@ while strat_first <= args.max_size:
     
     overwrite_progress(leave_current_stratum=True)
     stats.writerow([strat_first,strat_last,pop,sam])
+    statsfile.flush()
 
     # ...and move on to the next stratum.
     
