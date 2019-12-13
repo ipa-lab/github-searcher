@@ -4,38 +4,62 @@
 
 import os, sys, argparse, shutil, time, collections, signal
 import requests
-from recordclass import RecordClass
 
-# only files smaller than 384 KB are searchable (GitHub API restriction)
-MAX_FILE_SIZE = 393216
-
-if not 'GITHUB_TOKEN' in os.environ:
-    sys.exit('missing environment variable: GITHUB_TOKEN. see https://help.github.com/en/articles/creating-a-personal-access-token-for-the-command-line')
-github_token = os.environ['GITHUB_TOKEN']
+# Before we get to the fun stuff, we need to parse and validate arguments,
+# check environemtn variables, set up the help text and so on.
 
 # fix for argparse: ensure terminal width is determined correctly
 os.environ['COLUMNS'] = str(shutil.get_terminal_size().columns)
 
-parser = argparse.ArgumentParser(description='Exhaustively sample the GitHub Code Search API.', epilog='Additionally, the environment variable GITHUB_TOKEN needs to be present and contain your GitHub personal access token. See https://help.github.com/en/articles/creating-a-personal-access-token-for-the-command-line')
-parser.add_argument('query', metavar='QUERY', help='the search query. see https://help.github.com/en/github/searching-for-information-on-github/searching-code')
-parser.add_argument('--database', metavar='SQLITE.DB', required=True, help='name of the SQLite results database')
-parser.add_argument('--statistics', metavar='FILE.CSV', required=True, help='name of the sampling statistics CSV file')
-parser.add_argument('--min_size', type=int, default=1, help='minimum size of files to be searched, in bytes. default is 1.')
-parser.add_argument('--max_size', type=int, default=MAX_FILE_SIZE, help=f'maximum size of files to be searched, in bytes. default is {MAX_FILE_SIZE} (384 KB), which is the maximum allowed by GitHub.')
-parser.add_argument('--stratum_size', type=int, default=1) # TODO: help text
-parser.add_argument('--no-throttle', dest='throttle', action='store_false', help='disable request throttling. strongly discouraged: you will quickly run into rate limiting errors.')
+parser = argparse.ArgumentParser(
+    formatter_class=argparse.RawDescriptionHelpFormatter,
+    description='Exhaustively sample the GitHub Code Search API.', 
+    epilog='') # TODO
+
+parser.add_argument('query', metavar='QUERY', help='search query')
+
+parser.add_argument('--database', metavar='FILE', default='results.db', 
+    help='search results database file (default: results.db)')
+
+parser.add_argument('--statistics', metavar='FILE', default='sampling.csv', 
+    help='sampling statistics file (default: sampling.csv)')
+
+parser.add_argument('--min-size', metavar='BYTES', type=int, default=1, 
+    help='minimum code file size (default: 1)')
+
+# Only files smaller than 384 KB are searchable via the GitHub API.
+MAX_FILE_SIZE = 393216
+
+parser.add_argument('--max-size', metavar='BYTES', type=int, 
+    default=MAX_FILE_SIZE, 
+    help=f'maximum code file size (default: {MAX_FILE_SIZE})')
+
+parser.add_argument('--stratum-size', metavar='BYTES', type=int, default=1,
+    help='''length of file size ranges into which population is partitioned 
+    (default: 1)''')
+
+parser.add_argument('--no-throttle', dest='throttle', action='store_false', 
+    help='disable request throttling')
+
+parser.add_argument('--github-token', metavar='TOKEN', 
+    default=os.environ.get('GITHUB_TOKEN'), 
+    help='''personal access token for GitHub 
+    (by default, the environment variable GITHUB_TOKEN is used)''')
+
 args = parser.parse_args()
 
 if args.min_size < 1:
-    sys.exit('min_size must be positive')
+    sys.exit('min-size must be positive')
 if args.max_size < args.min_size:
-    sys.exit('max_size must be greater than or equal to min_size')
+    sys.exit('max-size must be greater than or equal to min-size')
 if args.max_size < 1:
-    sys.exit('max_size must be positive')
+    sys.exit('max-size must be positive')
 if args.max_size > MAX_FILE_SIZE:
-    sys.exit(f'max_size must be less than or equal to {MAX_FILE_SIZE}')
+    sys.exit(f'max-size must be less than or equal to {MAX_FILE_SIZE}')
 if args.stratum_size < 1:
-    sys.exit('stratum_size must be positive')
+    sys.exit('stratum-size must be positive')
+if not args.github_token:
+    sys.exit('missing environment variable GITHUB_TOKEN')
 
 # We define a signal handler to cleanly deal with Ctrl-C
 def signal_handler(sig,frame):
@@ -140,8 +164,8 @@ def update_status(msg):
 def get(url, params={}):
     if args.throttle:
         time.sleep(0.72) # throttle requests to ~5000 per hour
-    res = requests.get(url, params, 
-                        headers={'Authorization': f'token {github_token}'})
+    res = requests.get(url, params, headers=
+        {'Authorization': f'token {args.github_token}'})
     if res.status_code == 403:
         return handle_rate_limit_error(res)
     else:
@@ -191,6 +215,10 @@ def download_files_from_page(res):
         sam += 1
         total_sam += 1
         overwrite_progress()
+
+# TODO: database
+# TODO: stats file and continuation
+
 
 #-----------------------------------------------------------------------------
 
