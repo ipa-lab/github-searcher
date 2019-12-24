@@ -170,6 +170,7 @@ def get(url, params={}):
     if res.status_code == 403:
         return handle_rate_limit_error(res)
     else:
+        res.raise_for_status()
         return res
 
 def handle_rate_limit_error(res):
@@ -197,7 +198,9 @@ def search(a,b,order='asc'):
 # imposed by GitHub), we need to deal with pagination. On each page, we download
 # all files and add them and their metadata to our results database (which will
 # be set up in the next section), provided they're not already in the database
-# (which can happen when continuing a previous search).
+# (which can happen when continuing a previous search). Also, if any of the
+# files can not be downloaded, for whatever reason, they are simply skipped over
+# and count as not sampled.
 
 def download_all_files(res):
     global pop
@@ -216,9 +219,13 @@ def download_files_from_page(res):
     for item in res.json()['items']:
         if not known_file(item):
             repo = item['repository']
-            insert_repo(repo)
-            file = get(item['url']).json()
-            insert_file(file, repo['id'])
+            insert_repo(repo)            
+            try:
+                file = get(item['url']).json()
+            except:
+                continue
+            if file['type'] == 'file':
+                insert_file(file, repo['id'])
         sam += 1
         total_sam += 1
         clear_footer()
