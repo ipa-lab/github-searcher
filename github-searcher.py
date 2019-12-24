@@ -211,6 +211,8 @@ def download_all_files(res):
         pop2 = res.json()['total_count']
         pop = max(pop,pop2)
         download_files_from_page(res)
+        if sam >= pop:
+            break
     update_status('')
 
 def download_files_from_page(res):
@@ -232,6 +234,8 @@ def download_files_from_page(res):
         clear_footer()
         print_stratum(overwrite=True)
         print_footer()
+        if sam >= pop:
+            return
 
 #-------------------------------------------------------------------------------
 
