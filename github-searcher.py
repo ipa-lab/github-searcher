@@ -221,7 +221,8 @@ def download_files_from_page(res):
             repo = item['repository']
             insert_repo(repo)            
             try:
-                file = get(item['url']).json()
+                url = item['url'].replace('#', '%23')
+                file = get(url).json()
             except:
                 continue
             if file['type'] == 'file':
