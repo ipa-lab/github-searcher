@@ -1,0 +1,12 @@
+stratified-sample-github-search.pdf
+.DS_Store
+
+*.db
+
+# TeX
+*.aux
+*.log
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
