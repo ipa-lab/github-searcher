@@ -1,13 +1,11 @@
-Mining software repositories on GitHub has been enabled by datasets like GHTorrent and Google's BigQuery Public GitHub dataset.
-However, both these datasets suffer from a set of limitations that make them unusable for certain use cases.
-The GHTorrent dataset only provides meta-data and omits file contents containing the source code.
-The BigQuery dataset is incomplete as it only indexes repositories containing an open source license.
-The ground truth to mining code is the GitHub Code Search API.
+Mining software repositories on GitHub has been enabled by datasets like GHTorrent and GitHub's public contents dataset on Google's BigQuery platform.
+However, both of these datasets suffer from limitations that make them unsuitable for certain use cases: 
+GHTorrent only provides meta-data and omits source code entirely, 
+while the BigQuery dataset is incomplete, as it only indexes repositories with an explicit open source license.
+The ground truth to mining code is still the GitHub Code Search API.
 It allows users to retrieve file contents based on a simple search query.
-However, it is heavily rate-limited and only allows 1000 results per query.
-On the surface, this makes representative sampling, let alone retrieving exhaustive search results, impossible.
-We can take advantage of the ability to condition search with particular criteria (e.g., to files of a certain size) to get around this technical limitation.
-By repeatedly searching with the same search term but different incremental conditioning (e.g., size ranges), we can reach a good approximative sample of the overall population.
-This is a technique known as stratified sampling. 
-We developed a tool, github-searcher, that implements stratified sampling by conditioning on non-overlapping file size ranges.
+However, it is heavily rate-limited and only returns up to 1000 results per search.
+On the surface, this makes representative sampling, let alone exhaustive mining, impossible.
+We developed a tool, github-searcher, that implements a stratified sampling technique to get around this technical limitation.
+By repeatedly searching with the same search term but different incremental conditioning on non-overlapping file size ranges, we can reach a good approximative sample of the overall population.
 We present a case study in which we sample the search term 'alias' within Shell files to demonstrate the effectiveness of our approach.
