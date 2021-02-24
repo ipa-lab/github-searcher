@@ -175,8 +175,8 @@ def get(url, params={}):
 
 def handle_rate_limit_error(res):
     t = res.headers.get('X-RateLimit-Reset')
-    if t is not None: 
-        t = int(int(t) - time.time())
+    if t is not None:
+        t = max(0, int(int(t) - time.time()))
     else: 
         t = int(res.headers.get('Retry-After', 60))
     err_msg = f'Exceeded rate limit. Retrying after {t} seconds...'
